@@ -1,0 +1,105 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag name (e.g. v1.0)'
+        required: true
+        default: 'v1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          cat <<EOF > keystore.properties
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Build Release APK
+        run: gradle :app:assembleRelease --no-daemon
+
+      - name: Prepare Release assets
+        id: assets
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/ham-badge-APP-${TAG}-release.apk"
+          (cd dist && sha256sum "ham-badge-APP-${TAG}-release.apk" > SHA256SUMS.txt)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk=dist/ham-badge-APP-${TAG}-release.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Release Notes
+        run: |
+          cat <<'EOF' > dist/RELEASE_NOTES.md
+          ## ham-badge-APP ${{ steps.assets.outputs.tag }}
+
+          业余无线电（HAM）台站通联状态控制 Android 客户端（`QRZ 徽章`），基于 **Kotlin + Jetpack Compose + Material 3** 构建。
+
+          ### 主要特性
+          - **双模式安全登录**：支持邮箱密码 + 6 位一次性验证码（OTP），以及系统级 WebAuthn / Passkey 生物识别登录。
+          - **实时台站状态控制**：一键切换 `ON AIR` / `OFF AIR` 状态，展示 UTC 上线时间与当前工作参数。
+          - **工作参数与活动备注**：支持设置频率（`freq`）、模式（`mode`）与比赛/活动备注（`note`，最多 32 个字符），`ON AIR` 期间更新参数不重置上线时间。
+          - **独立设置页面**：集中管理 Passkey / 指纹绑定、自定义 `auth-service` / `ham-badge` 服务地址（支持恢复默认）以及服务端会话注销退出。
+          - **Material 3 动态配色**：支持 Android 12+ 动态取色与自动跟随系统明暗主题。
+
+          ### 安装与使用
+          1. 下载下方附件中的 `ham-badge-APP-${{ steps.assets.outputs.tag }}-release.apk` 并在 **Android 8.0+（API 26+）** 设备上安装。
+          2. 默认连接的配套服务端：
+             - `auth-service`：`https://auth.bh2xol.com`
+             - `ham-badge`：`https://status.bh2xol.com`
+             - 如需连接自建服务端，可在应用内 **「设置 → 服务地址配置」** 中修改。
+
+          ### 校验文件
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.assets.outputs.tag }}" \
+            "${{ steps.assets.outputs.apk }}" \
+            dist/SHA256SUMS.txt \
+            --title "ham-badge-APP ${{ steps.assets.outputs.tag }}" \
+            --notes-file dist/RELEASE_NOTES.md \
+            --target "${{ github.sha }}" || \
+          gh release upload "${{ steps.assets.outputs.tag }}" \
+            "${{ steps.assets.outputs.apk }}" \
+            dist/SHA256SUMS.txt \
+            --clobber
